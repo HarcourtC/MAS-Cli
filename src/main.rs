@@ -4,9 +4,10 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::env;
 use std::fs;
+use std::fs::OpenOptions;
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::process::{Child, Command, Stdio};
 use std::time::Duration;
 
 const DEFAULT_API_URL: &str = "http://127.0.0.1:36163";
@@ -35,6 +36,9 @@ struct Cli {
 
     #[arg(long, global = true)]
     keep_backend: bool,
+
+    #[arg(long = "elevated", hide = true, global = true)]
+    elevated: bool,
 
     #[command(subcommand)]
     command: RootCommand,
@@ -103,6 +107,12 @@ struct CliError {
     backend_payload: Option<Value>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum StartOutcome {
+    Ready,
+    HandedOffToElevatedProcess,
+}
+
 fn main() {
     let cli = Cli::parse();
     let exit_code = run(cli);
@@ -121,7 +131,7 @@ fn run(cli: Cli) -> i32 {
     let result = match &cli.command {
         RootCommand::Backend { command } => match command {
             BackendCommand::Status => cmd_backend_status(&cli, &ctx),
-            BackendCommand::Start => cmd_backend_start(&cli, &mut ctx),
+            BackendCommand::Start => cmd_backend_start(&cli, &mut ctx).map(|_| ()),
             BackendCommand::Stop => cmd_backend_stop(&cli, &mut ctx),
         },
         RootCommand::Queue { command } => match command {
@@ -201,7 +211,7 @@ fn cmd_backend_status(cli: &Cli, ctx: &RuntimeContext) -> Result<(), CliError> {
     Ok(())
 }
 
-fn cmd_backend_start(cli: &Cli, ctx: &mut RuntimeContext) -> Result<(), CliError> {
+fn cmd_backend_start(cli: &Cli, ctx: &mut RuntimeContext) -> Result<StartOutcome, CliError> {
     if !ctx.is_local_api {
         return Err(CliError {
             message: "远端 apiUrl 不支持 backend start".to_string(),
@@ -211,9 +221,15 @@ fn cmd_backend_start(cli: &Cli, ctx: &mut RuntimeContext) -> Result<(), CliError
         });
     }
 
+    if should_attempt_windows_elevation(cli) && !is_windows_admin() {
+        relaunch_self_as_admin()?;
+        emit_elevation_handoff(cli);
+        return Ok(StartOutcome::HandedOffToElevatedProcess);
+    }
+
     if probe_backend(&ctx.api_url).is_ok() {
         emit_backend_ready(cli, ctx, ctx.state.tracked_pid);
-        return Ok(());
+        return Ok(StartOutcome::Ready);
     }
 
     let app_root = ctx.app_root.clone().ok_or_else(|| CliError {
@@ -230,19 +246,7 @@ fn cmd_backend_start(cli: &Cli, ctx: &mut RuntimeContext) -> Result<(), CliError
         backend_payload: None,
     })?;
 
-    let mut child = Command::new(&python)
-        .arg("main.py")
-        .current_dir(&app_root)
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .spawn()
-        .map_err(|e| CliError {
-            message: format!("启动后端进程失败: {e}"),
-            category: "backend_startup_failed",
-            source: "cli",
-            backend_payload: None,
-        })?;
+    let mut child = spawn_backend_daemon(&python, &app_root)?;
 
     let pid = Some(child.id());
 
@@ -263,7 +267,7 @@ fn cmd_backend_start(cli: &Cli, ctx: &mut RuntimeContext) -> Result<(), CliError
     let _ = save_backend_state(&ctx.state);
 
     emit_backend_ready(cli, ctx, pid);
-    Ok(())
+    Ok(StartOutcome::Ready)
 }
 
 fn cmd_backend_stop(cli: &Cli, ctx: &mut RuntimeContext) -> Result<(), CliError> {
@@ -327,7 +331,10 @@ fn cmd_queue_list(cli: &Cli, ctx: &mut RuntimeContext) -> Result<(), CliError> {
             });
         }
 
-        cmd_backend_start(cli, ctx)?;
+        let outcome = cmd_backend_start(cli, ctx)?;
+        if outcome == StartOutcome::HandedOffToElevatedProcess {
+            return Ok(());
+        }
         started_temporarily = true;
     }
 
@@ -455,6 +462,25 @@ fn emit_backend_ready(cli: &Cli, ctx: &RuntimeContext, pid: Option<u32>) {
         if let Some(p) = pid {
             println!("pid: {}", p);
         }
+    }
+}
+
+fn emit_elevation_handoff(cli: &Cli) {
+    if cli.json {
+        let out = CliEnvelope {
+            code: 200,
+            status: "success".to_string(),
+            message: "已请求管理员权限，命令将在提权后继续执行".to_string(),
+            data: Some(json!({
+                "elevated": true,
+                "restarted": true
+            })),
+            source: None,
+            category: None,
+        };
+        print_json(&serde_json::to_value(out).unwrap_or_else(|_| json!({})));
+    } else {
+        println!("已请求管理员权限，命令将在提权后继续执行");
     }
 }
 
@@ -598,9 +624,9 @@ fn discover_python_executable(
     }
 
     if let Some(root) = app_root {
-        let embedded = root.join("environment").join("python");
-        if embedded.exists() {
-            return Ok(Some(embedded));
+        let embedded_dir = root.join("environment").join("python");
+        if let Some(path) = resolve_python_from_embedded_dir(&embedded_dir) {
+            return Ok(Some(path));
         }
     }
 
@@ -615,16 +641,190 @@ fn discover_python_executable(
     Ok(None)
 }
 
+fn should_attempt_windows_elevation(cli: &Cli) -> bool {
+    cfg!(target_os = "windows") && !cli.elevated
+}
+
+fn is_windows_admin() -> bool {
+    #[cfg(target_os = "windows")]
+    {
+        let script = "[bool]([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)";
+        let output = Command::new("powershell")
+            .arg("-NoProfile")
+            .arg("-NonInteractive")
+            .arg("-Command")
+            .arg(script)
+            .output();
+
+        match output {
+            Ok(out) if out.status.success() => String::from_utf8_lossy(&out.stdout)
+                .trim()
+                .eq_ignore_ascii_case("true"),
+            _ => false,
+        }
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        true
+    }
+}
+
+fn relaunch_self_as_admin() -> Result<(), CliError> {
+    #[cfg(target_os = "windows")]
+    {
+        let exe = env::current_exe().map_err(|e| CliError {
+            message: format!("读取当前可执行文件路径失败: {e}"),
+            category: "invalid_runtime_configuration",
+            source: "cli",
+            backend_payload: None,
+        })?;
+
+        let cwd = env::current_dir().map_err(|e| CliError {
+            message: format!("读取当前工作目录失败: {e}"),
+            category: "invalid_runtime_configuration",
+            source: "cli",
+            backend_payload: None,
+        })?;
+
+        let mut args: Vec<String> = env::args().skip(1).filter(|a| a != "--elevated").collect();
+        args.push("--elevated".to_string());
+
+        let arg_list = args
+            .iter()
+            .map(|a| format!("'{}'", a.replace('\'', "''")))
+            .collect::<Vec<_>>()
+            .join(",");
+
+        let script = format!(
+            "Start-Process -FilePath '{}' -ArgumentList @({}) -WorkingDirectory '{}' -Verb RunAs",
+            exe.display().to_string().replace('\'', "''"),
+            arg_list,
+            cwd.display().to_string().replace('\'', "''"),
+        );
+
+        let status = Command::new("powershell")
+            .arg("-NoProfile")
+            .arg("-NonInteractive")
+            .arg("-Command")
+            .arg(script)
+            .status()
+            .map_err(|e| CliError {
+                message: format!("请求管理员权限失败: {e}"),
+                category: "invalid_runtime_configuration",
+                source: "cli",
+                backend_payload: None,
+            })?;
+
+        if !status.success() {
+            return Err(CliError {
+                message: "用户取消了管理员权限请求或系统拒绝提权".to_string(),
+                category: "backend_startup_failed",
+                source: "cli",
+                backend_payload: None,
+            });
+        }
+        Ok(())
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        Ok(())
+    }
+}
+
 fn find_command_in_path(cmd: &str) -> Option<PathBuf> {
-    let output = Command::new("which").arg(cmd).output().ok()?;
+    let locator = if cfg!(target_os = "windows") {
+        "where"
+    } else {
+        "which"
+    };
+
+    let output = Command::new(locator).arg(cmd).output().ok()?;
     if !output.status.success() {
         return None;
     }
-    let path = String::from_utf8_lossy(&output.stdout).trim().to_string();
-    if path.is_empty() {
+    let first_line = String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .find(|line| !line.trim().is_empty())
+        .map(|s| s.trim().to_string())?;
+    if first_line.is_empty() {
         return None;
     }
-    Some(PathBuf::from(path))
+    let path = PathBuf::from(first_line);
+    if path.is_file() { Some(path) } else { None }
+}
+
+fn resolve_python_from_embedded_dir(embedded_dir: &Path) -> Option<PathBuf> {
+    if !embedded_dir.exists() {
+        return None;
+    }
+
+    let candidates = [
+        embedded_dir.join("python.exe"),
+        embedded_dir.join("python3.exe"),
+        embedded_dir.join("bin").join("python"),
+        embedded_dir.join("bin").join("python3"),
+        embedded_dir.to_path_buf(),
+    ];
+
+    candidates.iter().find(|p| p.is_file()).cloned()
+}
+
+fn spawn_backend_daemon(python: &Path, app_root: &Path) -> Result<Child, CliError> {
+    let log_dir = app_state_dir().unwrap_or_else(|| app_root.to_path_buf());
+    let _ = fs::create_dir_all(&log_dir);
+
+    let stdout_log = log_dir.join("backend.stdout.log");
+    let stderr_log = log_dir.join("backend.stderr.log");
+
+    let stdout_file = OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&stdout_log)
+        .map_err(|e| CliError {
+            message: format!("打开后端 stdout 日志失败: {e} ({})", stdout_log.display()),
+            category: "invalid_runtime_configuration",
+            source: "cli",
+            backend_payload: None,
+        })?;
+    let stderr_file = OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&stderr_log)
+        .map_err(|e| CliError {
+            message: format!("打开后端 stderr 日志失败: {e} ({})", stderr_log.display()),
+            category: "invalid_runtime_configuration",
+            source: "cli",
+            backend_payload: None,
+        })?;
+
+    let mut cmd = Command::new(python);
+    cmd.arg("main.py")
+        .current_dir(app_root)
+        .stdin(Stdio::null())
+        .stdout(Stdio::from(stdout_file))
+        .stderr(Stdio::from(stderr_file));
+
+    #[cfg(target_os = "windows")]
+    {
+        use std::os::windows::process::CommandExt;
+        const DETACHED_PROCESS: u32 = 0x0000_0008;
+        const CREATE_NEW_PROCESS_GROUP: u32 = 0x0000_0200;
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        cmd.creation_flags(DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP | CREATE_NO_WINDOW);
+    }
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        cmd.process_group(0);
+    }
+
+    cmd.spawn().map_err(|e| CliError {
+        message: format!("启动后端进程失败: {e} (python={})", python.display()),
+        category: "backend_startup_failed",
+        source: "cli",
+        backend_payload: None,
+    })
 }
 
 fn validate_app_root(path: PathBuf) -> Result<PathBuf, CliError> {
@@ -655,12 +855,19 @@ fn is_local_api_url(api_url: &str) -> bool {
 }
 
 fn state_file_path() -> Option<PathBuf> {
-    let home = env::var("HOME").ok()?;
+    let dir = app_state_dir()?;
+    Some(dir.join("state.json"))
+}
+
+fn app_state_dir() -> Option<PathBuf> {
+    let home = env::var("HOME")
+        .ok()
+        .or_else(|| env::var("USERPROFILE").ok())?;
     let dir = PathBuf::from(home).join(".auto-mas-cli");
     if fs::create_dir_all(&dir).is_err() {
         return None;
     }
-    Some(dir.join("state.json"))
+    Some(dir)
 }
 
 fn load_backend_state() -> Option<BackendState> {
