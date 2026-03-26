@@ -1,0 +1,54 @@
+name: build-win32
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - main
+      - master
+  pull_request:
+
+jobs:
+  build-win32:
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: i686-pc-windows-msvc
+
+      - name: Build Win32 binary (release)
+        run: cargo build --release --target i686-pc-windows-msvc
+
+      - name: Upload Win32 artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: auto-mas-cli-win32
+          path: target/i686-pc-windows-msvc/release/auto-mas-cli.exe
+          if-no-files-found: error
+
+  build-win64:
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-pc-windows-msvc
+
+      - name: Build Win64 binary (release)
+        run: cargo build --release --target x86_64-pc-windows-msvc
+
+      - name: Upload Win64 artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: auto-mas-cli-win64
+          path: target/x86_64-pc-windows-msvc/release/auto-mas-cli.exe
+          if-no-files-found: error
