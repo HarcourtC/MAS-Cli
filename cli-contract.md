@@ -1,4 +1,4 @@
-# AUTO-MAS CLI 契约 v1
+# AUTO-MAS CLI 契约 v1.1
 
 ## 1. 文档状态
 
@@ -12,14 +12,20 @@
 - 稳定命令名、参数名、输出格式与退出码，便于脚本调用与后续重写。
 - 将 CLI 分发问题与后端服务问题解耦。
 
+## 2.1 术语说明
+
+- 本文中的 `backend start` 指“启动后端进程本身”。
+- 本文中的“启动队列”或“启动任务”指“在后端已运行的前提下，通过 API 创建执行实例并开始调度”。
+- 两者不是同一层能力，不能混用。
+
 ## 3. 非目标
 
 - 不定义后端内部模块拆分方式。
-- v1 不要求 WebSocket 能力。
-- v1 不覆盖安装器实现细节，只约束安装后应具备的行为。
-- v1 不承诺任务级、脚本级运行控制契约。
+- v1.1 不要求 WebSocket 能力。
+- v1.1 不覆盖安装器实现细节，只约束安装后应具备的行为。
+- v1.1 不承诺任务级、脚本级运行控制契约。
 
-## 4. v1 范围
+## 4. v1.1 范围
 
 顶层二进制名：
 
@@ -27,13 +33,14 @@
 auto-mas-cli
 ```
 
-v1 必选命令：
+v1.1 必选命令：
 
 ```text
 auto-mas-cli backend status
 auto-mas-cli backend start
 auto-mas-cli backend stop
 auto-mas-cli queue list
+auto-mas-cli queue start --queue-id <id> [--mode <mode>]
 ```
 
 暂缓命令：
@@ -142,7 +149,24 @@ Python 解释器发现规则：
 - 默认允许自动拉起后端，除非显式传入 `--no-auto-start`。
 - 若是 CLI 为本次命令临时拉起的后端，命令完成后可以自动关闭，除非传入 `--keep-backend`。
 
-当前稳定契约仅保留 queue 级别的可见控制入口，不对 task 级或脚本级运行控制做公开承诺。
+`queue start`：
+
+- 这是 API 直连命令，用于在后端已运行（或可自动拉起）的前提下启动指定队列执行。
+- 默认允许自动拉起后端，除非显式传入 `--no-auto-start`。
+- 命令参数：
+  - `--queue-id <id>`：必填，目标队列 ID。
+  - `--mode <mode>`：可选，默认值为 `AutoProxy`。
+- CLI 应调用 `POST /api/dispatch/start`，请求体格式如下：
+  ```json
+  {
+    "mode": "AutoProxy",
+    "taskId": "<queueId>"
+  }
+  ```
+- 其中 `taskId` 字段在该命令语义下承载 queue ID；CLI 不应在本层重命名后端字段。
+- 成功时 JSON 输出应优先透传后端响应字段（通常为 `OutBase` 风格）。
+
+当前稳定契约保留 queue 级别可见控制入口（`queue list`、`queue start`），不对 task 级或脚本级运行控制做公开承诺。
 
 ### 7.3 信号与中断语义
 
@@ -152,12 +176,13 @@ Python 解释器发现规则：
 
 ## 8. 后端 API 映射
 
-v1 依赖的后端接口如下：
+v1.1 依赖的后端接口如下：
 
 ```text
 POST /api/info/version
 POST /api/core/close
 POST /api/queue/get
+POST /api/dispatch/start
 ```
 
 命令与接口的映射关系：
@@ -180,12 +205,24 @@ POST /api/queue/get
     {"queueId": null}
     ```
   - 后端返回模型：`QueueGetOut`
+- `queue start`
+  - 接口：`POST /api/dispatch/start`
+  - 请求体：
+    ```json
+    {
+      "mode": "AutoProxy",
+      "taskId": "<queueId>"
+    }
+    ```
+  - 后端返回模型：`OutBase`
+  - 注意：`taskId` 为后端既有字段，CLI 在 queue 语义下将其映射为 queue ID 输入。
 
 当前边界说明：
 
-- 后端内部虽然存在 `dispatch` 相关能力，但当前不作为稳定 CLI 契约的一部分公开。
-- 现阶段 CLI 仅稳定承诺 backend 级与 queue 级能力。
+- `dispatch` 相关能力在 v1.1 中仅公开 queue 级入口（`queue start`）。
+- 现阶段 CLI 稳定承诺 backend 级与 queue 级能力。
 - `backend stop` 可作为远端控制能力使用，但 `backend start` 仍仅限本地编排。
+- 文档中“不支持后端启动接口”仅指“不支持通过公开 API 启动后端进程本身”；不影响通过 `dispatch/start` 启动队列执行。
 
 ## 9. 输出契约
 
@@ -209,7 +246,7 @@ JSON 模式约束：
 - `--json` 模式下，不应再向 stdout 或 stderr 混入额外的人类文本。
 - JSON 中的 `code` 始终表示契约结果码，不表示进程退出码；进程退出码只由 CLI 进程本身返回。
 
-当前 v1 建议的 JSON 成功语义如下：
+当前 v1.1 建议的 JSON 成功语义如下：
 
 - `backend status`
   - 后端运行时：
@@ -294,6 +331,8 @@ JSON 模式约束：
     ```
 - `queue list`
   - 直接透传 `QueueGetOut`
+- `queue start`
+  - 直接透传 `OutBase`
 
 文本模式示例：
 
@@ -307,6 +346,12 @@ python: /path/to/python
 ```text
 queueId	name
 <queue-id>	默认队列
+```
+
+```text
+queue start accepted
+queueId: <queue-id>
+mode: AutoProxy
 ```
 
 ```text
@@ -376,7 +421,7 @@ CLI 本地错误的推荐 JSON 结构：
 - `11`：后端启动失败
 - `12`：后端业务错误
 
-v1 Python 参考实现当前仍可将大部分运行时与后端失败折叠为 `1`，但后续实现不应改变命令语义。
+v1.1 Python 参考实现当前仍可将大部分运行时与后端失败折叠为 `1`，但后续实现不应改变命令语义。
 
 ## 12. 分发契约
 
@@ -394,7 +439,7 @@ L2 安装器模式：
 
 - 安装器必须将 CLI 安装目录加入用户 `PATH`。
 - 卸载时必须移除自己新增的 `PATH` 项。
-- Windows `App Paths` 支持可选，不是 v1 必选项。
+- Windows `App Paths` 支持可选，不是 v1.1 必选项。
 
 L3 产品化模式：
 
@@ -407,7 +452,7 @@ L3 产品化模式：
 - API 直连类命令在 JSON 模式下，应优先复用现有后端响应字段。
 - 可以新增命令，但不应改变已发布命令的语义。
 - 若后端 API 契约发生变化，应先更新契约文档，再修改 CLI 实现。
-- 后端兼容性协商机制可后续单独引入，但不属于 v1 CLI 客户端必须承担的职责。
+- 后端兼容性协商机制可后续单独引入，但不属于 v1.1 CLI 客户端必须承担的职责。
 
 ## 14. Rust 重写边界
 
@@ -421,7 +466,7 @@ L3 产品化模式：
 ## 15. 与 `mas-api-contract` 对齐说明
 
 - 后端 HTTP 接口仍以 `*In` / `*Out` 模型为准，例如 `QueueGetOut`、`OutBase`。
-- 当前 CLI 稳定契约只消费其中的 backend / queue 相关接口，不对 task 相关接口做稳定暴露。
+- 当前 CLI 稳定契约消费 backend / queue 相关接口；`queue start` 允许通过 `dispatch/start` 触发队列运行，但不扩展为通用 task 级公开契约。
 - 后端标准错误字段仍以 `code`、`status`、`message` 为核心。
 - CLI 只有在执行“编排类命令”时，才允许输出不对应某个后端 `*Out` 的本地结果对象。
 - 即使 CLI 需要添加附加字段，也应采用增量方式，不应发明与后端已有语义冲突的新错误包络。
