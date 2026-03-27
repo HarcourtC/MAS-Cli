@@ -22,14 +22,13 @@ pub(crate) fn discover_app_root(
         candidates.push(cwd);
     }
 
-    if let Ok(current_exe) = env::current_exe() {
-        if let Some(parent) = current_exe.parent() {
+    if let Ok(current_exe) = env::current_exe()
+        && let Some(parent) = current_exe.parent() {
             candidates.push(parent.to_path_buf());
             if let Some(pp) = parent.parent() {
                 candidates.push(pp.to_path_buf());
             }
         }
-    }
 
     for candidate_path in candidates {
         if is_valid_app_root(&candidate_path) {
@@ -88,13 +87,11 @@ pub(crate) fn save_backend_state(state: &BackendState) -> io::Result<()> {
 }
 
 pub(crate) fn clear_state_if_matches(api_url: &str) {
-    if let Some(path) = state_file_path() {
-        if let Some(state) = load_backend_state() {
-            if state.api_url.as_deref() == Some(api_url) {
+    if let Some(path) = state_file_path()
+        && let Some(state) = load_backend_state()
+            && state.api_url.as_deref() == Some(api_url) {
                 let _ = fs::remove_file(path);
             }
-        }
-    }
 }
 
 pub(crate) fn app_state_dir() -> Option<PathBuf> {
