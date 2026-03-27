@@ -42,10 +42,10 @@ struct Cli {
     elevated: bool,
 
     #[command(subcommand)]
-    command: RootCommand,
+    command: Option<RootCommand>,
 }
 
-#[derive(Debug, Subcommand)]
+#[derive(Debug, Clone, Subcommand)]
 enum RootCommand {
     Backend {
         #[command(subcommand)]
@@ -57,14 +57,14 @@ enum RootCommand {
     },
 }
 
-#[derive(Debug, Subcommand)]
+#[derive(Debug, Clone, Subcommand)]
 enum BackendCommand {
     Status,
     Start,
     Stop,
 }
 
-#[derive(Debug, Subcommand)]
+#[derive(Debug, Clone, Subcommand)]
 enum QueueCommand {
     List,
     Start {
@@ -152,7 +152,16 @@ fn run(cli: Cli) -> i32 {
         }
     };
 
-    let result = commands::execute(&cli, &mut ctx);
+    let result = if let Some(command) = &cli.command {
+        commands::execute(&cli, &mut ctx, command)
+    } else if cli.json {
+        Err(cli_error(
+            "invalid_arguments",
+            "缺少子命令；--json 模式下请明确传入命令",
+        ))
+    } else {
+        run_repl(&cli, &mut ctx)
+    };
 
     match result {
         Ok(()) => EXIT_OK,
@@ -161,6 +170,134 @@ fn run(cli: Cli) -> i32 {
             EXIT_ERROR
         }
     }
+}
+
+fn run_repl(cli: &Cli, ctx: &mut RuntimeContext) -> Result<(), CliError> {
+    let stdin = io::stdin();
+    let mut line = String::new();
+
+    loop {
+        print!("mas> ");
+        let _ = io::stdout().flush();
+
+        line.clear();
+        let read = stdin.read_line(&mut line).map_err(|e| {
+            cli_error(
+                "invalid_runtime_configuration",
+                format!("读取输入失败: {e}"),
+            )
+        })?;
+        if read == 0 {
+            println!();
+            break;
+        }
+
+        let input = line.trim();
+        if input.is_empty() {
+            continue;
+        }
+
+        match parse_repl_command(input) {
+            Ok(None) => continue,
+            Ok(Some(command)) => {
+                if let Err(err) = commands::execute(cli, ctx, &command) {
+                    emit_error(cli, &err);
+                }
+            }
+            Err(message) => eprintln!("错误: {}", message),
+        }
+    }
+
+    Ok(())
+}
+
+fn parse_repl_command(input: &str) -> Result<Option<RootCommand>, String> {
+    let args: Vec<&str> = input.split_whitespace().collect();
+    if args.is_empty() {
+        return Ok(None);
+    }
+
+    match args[0] {
+        "exit" | "quit" => {
+            std::process::exit(0);
+        }
+        "help" | "/help" => {
+            print_repl_help();
+            Ok(None)
+        }
+        "backend" => parse_repl_backend(&args),
+        "queue" => parse_repl_queue(&args),
+        _ => Err("未知命令，输入 help 查看可用命令".to_string()),
+    }
+}
+
+fn parse_repl_backend(args: &[&str]) -> Result<Option<RootCommand>, String> {
+    if args.len() < 2 {
+        return Err("用法: backend <status|start|stop>".to_string());
+    }
+    let command = match args[1] {
+        "status" => BackendCommand::Status,
+        "start" => BackendCommand::Start,
+        "stop" => BackendCommand::Stop,
+        _ => return Err("backend 子命令仅支持: status/start/stop".to_string()),
+    };
+    Ok(Some(RootCommand::Backend { command }))
+}
+
+fn parse_repl_queue(args: &[&str]) -> Result<Option<RootCommand>, String> {
+    if args.len() < 2 {
+        return Err("用法: queue <list|start ...>".to_string());
+    }
+    match args[1] {
+        "list" => Ok(Some(RootCommand::Queue {
+            command: QueueCommand::List,
+        })),
+        "start" => {
+            let mut queue_id: Option<String> = None;
+            let mut mode = "AutoProxy".to_string();
+            let mut i = 2usize;
+            while i < args.len() {
+                match args[i] {
+                    "--queue-id" => {
+                        let value = args
+                            .get(i + 1)
+                            .ok_or_else(|| "queue start 缺少 --queue-id 的值".to_string())?;
+                        queue_id = Some((*value).to_string());
+                        i += 2;
+                    }
+                    "--mode" => {
+                        let value = args
+                            .get(i + 1)
+                            .ok_or_else(|| "queue start 缺少 --mode 的值".to_string())?;
+                        mode = (*value).to_string();
+                        i += 2;
+                    }
+                    _ => {
+                        if queue_id.is_none() {
+                            queue_id = Some(args[i].to_string());
+                            i += 1;
+                        } else {
+                            return Err(format!("无法识别参数: {}", args[i]));
+                        }
+                    }
+                }
+            }
+            let queue_id = queue_id
+                .ok_or_else(|| "用法: queue start --queue-id <id> [--mode <mode>]".to_string())?;
+            Ok(Some(RootCommand::Queue {
+                command: QueueCommand::Start { queue_id, mode },
+            }))
+        }
+        _ => Err("queue 子命令仅支持: list/start".to_string()),
+    }
+}
+
+fn print_repl_help() {
+    println!("Tips for getting started:");
+    println!("1. backend status|start|stop");
+    println!("2. queue list");
+    println!("3. queue start --queue-id <id> [--mode <mode>]");
+    println!("4. help / exit");
 }
 
 fn build_context(cli: &Cli) -> Result<RuntimeContext, CliError> {

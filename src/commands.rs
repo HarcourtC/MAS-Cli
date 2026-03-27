@@ -12,8 +12,12 @@ use std::path::Path;
 use std::process::{Child, Command, Stdio};
 use std::time::Duration;
 
-pub(crate) fn execute(cli: &Cli, ctx: &mut RuntimeContext) -> Result<(), CliError> {
-    match &cli.command {
+pub(crate) fn execute(
+    cli: &Cli,
+    ctx: &mut RuntimeContext,
+    command: &crate::RootCommand,
+) -> Result<(), CliError> {
+    match command {
         crate::RootCommand::Backend { command } => match command {
             crate::BackendCommand::Status => cmd_backend_status(cli, ctx),
             crate::BackendCommand::Start => cmd_backend_start(cli, ctx).map(|_| ()),
