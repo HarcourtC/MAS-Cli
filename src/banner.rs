@@ -33,7 +33,12 @@ pub(crate) fn print_mas_cli_banner() {
             "{}2. Run queue list or queue start --queue-id <id>{}",
             muted, reset
         );
-        println!("{}3. Type help for commands, exit to quit{}", muted, reset);
+        println!("{}3. Run update check/apply{}", muted, reset);
+        println!(
+            "{}4. Run install register/unregister (Windows){}",
+            muted, reset
+        );
+        println!("{}5. Type help for commands, exit to quit{}", muted, reset);
         println!();
     } else {
         println!();
@@ -44,7 +49,9 @@ pub(crate) fn print_mas_cli_banner() {
         println!("Tips for getting started:");
         println!("1. Run backend status/start/stop");
         println!("2. Run queue list or queue start --queue-id <id>");
-        println!("3. Type help for commands, exit to quit");
+        println!("3. Run update check/apply");
+        println!("4. Run install register/unregister (Windows)");
+        println!("5. Type help for commands, exit to quit");
         println!();
     }
 }

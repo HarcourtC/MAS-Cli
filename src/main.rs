@@ -1,7 +1,9 @@
 mod banner;
 mod commands;
+mod installer;
 mod queue_output;
 mod runtime;
+mod updater;
 
 use clap::{Parser, Subcommand};
 use serde::{Deserialize, Serialize};
@@ -16,7 +18,8 @@ const SOURCE_CLI: &str = "cli";
 const SOURCE_BACKEND: &str = "backend";
 
 #[derive(Debug, Parser)]
-#[command(name = "auto-mas-cli")]
+#[command(name = "mas")]
+#[command(bin_name = "mas")]
 #[command(version)]
 #[command(about = "AUTO-MAS CLI")]
 struct Cli {
@@ -55,6 +58,14 @@ enum RootCommand {
         #[command(subcommand)]
         command: QueueCommand,
     },
+    Update {
+        #[command(subcommand)]
+        command: UpdateCommand,
+    },
+    Install {
+        #[command(subcommand)]
+        command: InstallCommand,
+    },
 }
 
 #[derive(Debug, Clone, Subcommand)]
@@ -73,6 +84,18 @@ enum QueueCommand {
         #[arg(long, default_value = "AutoProxy")]
         mode: String,
     },
+}
+
+#[derive(Debug, Clone, Subcommand)]
+enum UpdateCommand {
+    Check,
+    Apply,
+}
+
+#[derive(Debug, Clone, Subcommand)]
+enum InstallCommand {
+    Register,
+    Unregister,
 }
 
 #[derive(Debug, Serialize)]
@@ -152,6 +175,10 @@ fn run(cli: Cli) -> i32 {
         }
     };
 
+    if !cli.json && cli.command.is_none() {
+        updater::print_startup_update_hint();
+    }
+
     let result = if let Some(command) = &cli.command {
         commands::execute(&cli, &mut ctx, command)
     } else if cli.json {
@@ -227,6 +254,8 @@ fn parse_repl_command(input: &str) -> Result<Option<RootCommand>, String> {
         }
         "backend" => parse_repl_backend(&args),
         "queue" => parse_repl_queue(&args),
+        "update" => parse_repl_update(&args),
+        "install" => parse_repl_install(&args),
         _ => Err("未知命令，输入 help 查看可用命令".to_string()),
     }
 }
@@ -292,12 +321,38 @@ fn parse_repl_queue(args: &[&str]) -> Result<Option<RootCommand>, String> {
     }
 }
 
+fn parse_repl_update(args: &[&str]) -> Result<Option<RootCommand>, String> {
+    if args.len() < 2 {
+        return Err("用法: update <check|apply>".to_string());
+    }
+    let command = match args[1] {
+        "check" => UpdateCommand::Check,
+        "apply" => UpdateCommand::Apply,
+        _ => return Err("update 子命令仅支持: check/apply".to_string()),
+    };
+    Ok(Some(RootCommand::Update { command }))
+}
+
+fn parse_repl_install(args: &[&str]) -> Result<Option<RootCommand>, String> {
+    if args.len() < 2 {
+        return Err("用法: install <register|unregister>".to_string());
+    }
+    let command = match args[1] {
+        "register" => InstallCommand::Register,
+        "unregister" => InstallCommand::Unregister,
+        _ => return Err("install 子命令仅支持: register/unregister".to_string()),
+    };
+    Ok(Some(RootCommand::Install { command }))
+}
+
 fn print_repl_help() {
     println!("Tips for getting started:");
     println!("1. backend status|start|stop");
     println!("2. queue list");
     println!("3. queue start --queue-id <id> [--mode <mode>]");
-    println!("4. help / exit");
+    println!("4. update check|apply");
+    println!("5. install register|unregister");
+    println!("6. help / exit");
 }
 
 fn build_context(cli: &Cli) -> Result<RuntimeContext, CliError> {

@@ -1,6 +1,6 @@
 use crate::{
     Cli, CliEnvelope, CliError, RuntimeContext, SOURCE_BACKEND, StartOutcome, cli_error,
-    emit_json_envelope, print_json, queue_output, runtime,
+    emit_json_envelope, installer, print_json, queue_output, runtime, updater,
 };
 use reqwest::blocking::Client;
 use serde_json::{Value, json};
@@ -29,7 +29,101 @@ pub(crate) fn execute(
                 cmd_queue_start(cli, ctx, queue_id, mode)
             }
         },
+        crate::RootCommand::Update { command } => match command {
+            crate::UpdateCommand::Check => cmd_update_check(cli),
+            crate::UpdateCommand::Apply => cmd_update_apply(cli),
+        },
+        crate::RootCommand::Install { command } => match command {
+            crate::InstallCommand::Register => cmd_install_register(cli),
+            crate::InstallCommand::Unregister => cmd_install_unregister(cli),
+        },
     }
+}
+
+fn cmd_update_check(cli: &Cli) -> Result<(), CliError> {
+    let update = updater::check_update()?;
+    if cli.json {
+        emit_json_envelope(CliEnvelope {
+            code: 200,
+            status: "success".to_string(),
+            message: if update.has_update {
+                "发现可用更新".to_string()
+            } else {
+                "当前已是最新版本".to_string()
+            },
+            data: Some(update.to_json()),
+            source: None,
+            category: None,
+        });
+    } else if update.has_update {
+        println!("发现新版本: {} -> {}", update.current_version, update.latest_version);
+        println!("执行 `mas update apply` 进行更新");
+    } else {
+        println!("当前已是最新版本: {}", update.current_version);
+    }
+    Ok(())
+}
+
+fn cmd_update_apply(cli: &Cli) -> Result<(), CliError> {
+    let outcome = updater::apply_update()?;
+    if cli.json {
+        emit_json_envelope(CliEnvelope {
+            code: 200,
+            status: "success".to_string(),
+            message: outcome.message.clone(),
+            data: Some(outcome.to_json()),
+            source: None,
+            category: None,
+        });
+    } else {
+        println!("{}", outcome.message);
+        if let Some(version) = &outcome.latest_version {
+            println!("latest: {}", version);
+        }
+        if let Some(cmd) = &outcome.next_step {
+            println!("next: {}", cmd);
+        }
+    }
+    Ok(())
+}
+
+fn cmd_install_register(cli: &Cli) -> Result<(), CliError> {
+    let result = installer::register_command_alias()?;
+    if cli.json {
+        emit_json_envelope(CliEnvelope {
+            code: 200,
+            status: "success".to_string(),
+            message: "系统命令注册完成".to_string(),
+            data: Some(result.to_json()),
+            source: None,
+            category: None,
+        });
+    } else {
+        println!("已注册系统命令: mas");
+        println!("location: {}", result.installed_executable.display());
+        println!("pathUpdated: {}", result.path_updated);
+        println!("提示: 请重开终端使 PATH 生效");
+    }
+    Ok(())
+}
+
+fn cmd_install_unregister(cli: &Cli) -> Result<(), CliError> {
+    let result = installer::unregister_command_alias()?;
+    if cli.json {
+        emit_json_envelope(CliEnvelope {
+            code: 200,
+            status: "success".to_string(),
+            message: "系统命令已取消注册".to_string(),
+            data: Some(result.to_json()),
+            source: None,
+            category: None,
+        });
+    } else {
+        println!("已取消注册系统命令: mas");
+        println!("executableRemoved: {}", result.executable_removed);
+        println!("pathUpdated: {}", result.path_updated);
+    }
+    Ok(())
 }
 
 fn cmd_backend_status(cli: &Cli, ctx: &RuntimeContext) -> Result<(), CliError> {

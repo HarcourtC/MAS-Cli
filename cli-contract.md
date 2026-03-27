@@ -1,4 +1,4 @@
-# AUTO-MAS CLI 契约 v1.1
+# AUTO-MAS CLI 契约 v1.2
 
 ## 1. 文档状态
 
@@ -21,26 +21,36 @@
 ## 3. 非目标
 
 - 不定义后端内部模块拆分方式。
-- v1.1 不要求 WebSocket 能力。
-- v1.1 不覆盖安装器实现细节，只约束安装后应具备的行为。
-- v1.1 不承诺任务级、脚本级运行控制契约。
+- v1.2 不要求 WebSocket 能力。
+- v1.2 不覆盖安装器实现细节，只约束安装后应具备的行为。
+- v1.2 不承诺任务级、脚本级运行控制契约。
 
-## 4. v1.1 范围
+## 4. v1.2 范围
 
-顶层二进制名：
+顶层命令名：
+
+```text
+mas
+```
+
+开发态兼容入口：
 
 ```text
 auto-mas-cli
 ```
 
-v1.1 必选命令：
+v1.2 必选命令：
 
 ```text
-auto-mas-cli backend status
-auto-mas-cli backend start
-auto-mas-cli backend stop
-auto-mas-cli queue list
-auto-mas-cli queue start --queue-id <id> [--mode <mode>]
+mas backend status
+mas backend start
+mas backend stop
+mas queue list
+mas queue start --queue-id <id> [--mode <mode>]
+mas update check
+mas update apply
+mas install register
+mas install unregister
 ```
 
 暂缓命令：
@@ -168,7 +178,41 @@ Python 解释器发现规则：
 
 当前稳定契约保留 queue 级别可见控制入口（`queue list`、`queue start`），不对 task 级或脚本级运行控制做公开承诺。
 
-### 7.3 信号与中断语义
+### 7.3 安装与更新命令
+
+`install register`：
+
+- 首版仅要求 Windows 支持。
+- CLI 必须将自身可执行文件安装到当前用户目录（建议 `%LOCALAPPDATA%\\AUTO-MAS\\bin\\mas.exe`）。
+- CLI 必须以幂等方式将安装目录写入用户 PATH。
+- 若 PATH 已包含目标目录，重复执行应成功且不重复追加。
+
+`install unregister`：
+
+- 首版仅要求 Windows 支持。
+- CLI 应删除自己安装的 `mas.exe`（若存在）。
+- CLI 应从用户 PATH 中移除自己追加的安装目录（仅移除匹配项）。
+- 重复执行应成功。
+
+`update check`：
+
+- CLI 通过 GitHub Release latest API 检查最新版本。
+- 首版固定仓库 `HarcourtC/MAS-Cli`。
+- 首版仅要求 Windows 平台返回可更新包匹配结果。
+
+`update apply`：
+
+- 首版仅要求 Windows 支持。
+- CLI 从 GitHub Release 下载当前架构更新包。
+- 若当前为最新版本，命令应幂等成功并明确提示。
+- Windows 上允许“退出后替换”的更新策略，不要求在命令返回前完成二进制替换。
+
+启动时自动检查更新：
+
+- 仅文本模式可输出更新提示。
+- `--json` 模式下禁止输出更新提示文本，避免污染机器可读输出。
+
+### 7.4 信号与中断语义
 
 - CLI 进程若被 `Ctrl+C`、终端关闭或其他外部信号中断，不应主动关闭后端。
 - “用户中断 CLI” 与 “用户要求停止后端” 是两种不同语义，不能混用。
@@ -176,7 +220,7 @@ Python 解释器发现规则：
 
 ## 8. 后端 API 映射
 
-v1.1 依赖的后端接口如下：
+v1.2 依赖的后端接口如下：
 
 ```text
 POST /api/info/version
@@ -216,10 +260,19 @@ POST /api/dispatch/start
     ```
   - 后端返回模型：`OutBase`
   - 注意：`taskId` 为后端既有字段，CLI 在 queue 语义下将其映射为 queue ID 输入。
+- `update check`
+  - 外部接口：`GET /repos/HarcourtC/MAS-Cli/releases/latest`（GitHub API）
+  - 注意：该命令不依赖后端 API。
+- `update apply`
+  - 外部接口：GitHub Release 资产下载 URL
+  - 注意：该命令不依赖后端 API，首版仅要求 Windows 平台。
+- `install register` / `install unregister`
+  - 无后端 API。
+  - 注意：该命令操作本地安装目录与用户 PATH，首版仅要求 Windows 平台。
 
 当前边界说明：
 
-- `dispatch` 相关能力在 v1.1 中仅公开 queue 级入口（`queue start`）。
+- `dispatch` 相关能力在 v1.2 中仅公开 queue 级入口（`queue start`）。
 - 现阶段 CLI 稳定承诺 backend 级与 queue 级能力。
 - `backend stop` 可作为远端控制能力使用，但 `backend start` 仍仅限本地编排。
 - 文档中“不支持后端启动接口”仅指“不支持通过公开 API 启动后端进程本身”；不影响通过 `dispatch/start` 启动队列执行。
@@ -246,7 +299,7 @@ JSON 模式约束：
 - `--json` 模式下，不应再向 stdout 或 stderr 混入额外的人类文本。
 - JSON 中的 `code` 始终表示契约结果码，不表示进程退出码；进程退出码只由 CLI 进程本身返回。
 
-当前 v1.1 建议的 JSON 成功语义如下：
+当前 v1.2 建议的 JSON 成功语义如下：
 
 - `backend status`
   - 后端运行时：
@@ -333,6 +386,12 @@ JSON 模式约束：
   - 直接透传 `QueueGetOut`
 - `queue start`
   - 直接透传 `OutBase`
+- `update check`
+  - 返回统一包络，至少包含当前版本、最新版本、是否可更新
+- `update apply`
+  - 返回统一包络，至少包含是否已触发更新及下一步提示
+- `install register` / `install unregister`
+  - 返回统一包络，至少包含 PATH 是否被修改
 
 文本模式示例：
 
@@ -364,6 +423,17 @@ apiUrl: http://127.0.0.1:36163
 后端关闭请求已发送
 target: remote
 apiUrl: https://example.com
+```
+
+```text
+发现新版本: 0.1.0 -> 0.1.1
+执行 `mas update apply` 进行更新
+```
+
+```text
+已注册系统命令: mas
+location: C:\Users\<user>\AppData\Local\AUTO-MAS\bin\mas.exe
+pathUpdated: true
 ```
 
 ## 10. 错误契约
@@ -421,7 +491,7 @@ CLI 本地错误的推荐 JSON 结构：
 - `11`：后端启动失败
 - `12`：后端业务错误
 
-v1.1 Python 参考实现当前仍可将大部分运行时与后端失败折叠为 `1`，但后续实现不应改变命令语义。
+v1.2 Python 参考实现当前仍可将大部分运行时与后端失败折叠为 `1`，但后续实现不应改变命令语义。
 
 ## 12. 分发契约
 
@@ -439,11 +509,14 @@ L2 安装器模式：
 
 - 安装器必须将 CLI 安装目录加入用户 `PATH`。
 - 卸载时必须移除自己新增的 `PATH` 项。
-- Windows `App Paths` 支持可选，不是 v1.1 必选项。
+- Windows `App Paths` 支持可选，不是 v1.2 必选项。
 
 L3 产品化模式：
 
 - 需要补齐 CLI 版本管理、升级流程与签名。
+- Windows Release 资产命名固定为：
+  - `mas-x86_64-pc-windows-msvc.exe`
+  - `mas-i686-pc-windows-msvc.exe`
 - 后端生命周期可以逐步演进为服务模式，但上文定义的命令语义不能被悄悄改写。
 
 ## 13. 兼容性规则
@@ -452,7 +525,7 @@ L3 产品化模式：
 - API 直连类命令在 JSON 模式下，应优先复用现有后端响应字段。
 - 可以新增命令，但不应改变已发布命令的语义。
 - 若后端 API 契约发生变化，应先更新契约文档，再修改 CLI 实现。
-- 后端兼容性协商机制可后续单独引入，但不属于 v1.1 CLI 客户端必须承担的职责。
+- 后端兼容性协商机制可后续单独引入，但不属于 v1.2 CLI 客户端必须承担的职责。
 
 ## 14. Rust 重写边界
 
